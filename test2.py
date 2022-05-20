@@ -23,6 +23,8 @@ print("utilizzi", [[b.data_val("nome"),b.data_val("volumetria"),b.hash] for b in
 seed = c1.block_set.order_by('index').first()
 print ("seed",seed)
 
+print   ()
+print   ("========================================================")
 print ("leafs",list(c1.block_set.filter(previous_hash=seed.hash)))
 print   ("----------------------------------------------------------------")
 target = "000a4d46e7b1fdca19b293ad08d65519eee40770e807cc76102a6b578a12b430"
@@ -30,7 +32,7 @@ target = "000a4d46e7b1fdca19b293ad08d65519eee40770e807cc76102a6b578a12b430"
 b1 = Block.objects.get(hash=target)
 
 print ("is_valid_block", b1.is_valid_block())
-
+print   ()
 print   ("========================================================")
 print ("genealogy", b1.genealogy())
 
@@ -40,6 +42,7 @@ for b in b1.genealogy():
     print ("------------------------")
     print (json.loads(b.data))
 
+print   ()
 print   ("========================================================")
 print ("tutti blocchi", b1.chain.block_set.order_by('index'))
 
