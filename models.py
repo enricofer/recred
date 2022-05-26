@@ -2,6 +2,9 @@ from django.contrib.gis.db import models
 from django.conf import settings
 from django.contrib.auth.hashers import get_random_string
 from django.core.serializers.json import DjangoJSONEncoder
+from django.core.exceptions import ValidationError,RequestAborted
+
+from localflavor.it.util import ssn_validation,vat_number_validation
 
 import os
 import json
@@ -10,15 +13,70 @@ from hashlib import sha256
 from datetime import datetime
 from cryptography.fernet import Fernet, base64, InvalidSignature, InvalidToken
 import hashlib
+from functools import reduce
 
 __author__ = "Enrico Ferreguti"
 __email__ = "enricofer@gmail.com"
-__copyright__ = "Copyright 2017, Enrico Ferreguti"
+__copyright__ = "Copyright 2022, Enrico Ferreguti"
 __license__ = "GPL3"
 
+PREF_HASH = "0000"
 
-PREF_HASH = "000"
+#potrebbe essere necessario specificare la causale della transazione
+CAUSALI_CHOICES = [
+    ('compravendita','compravendita'),
+    ('voltura','voltura'),
+    ('altro','altro'),
+]
 
+TIPO_CREDITO_CHOICES = [
+    ('CE','Crediti edilizi'),
+    ('CER','Crediti edilizi da rinaturalizzazione'),
+]
+
+ISOVALORE_CHOICES = [
+    ("B1","B1 - CENTRO STORICO ENTRO RIVIERE-VIA XX SETTEMBRE"),
+    ("B2","B2 - CENTRO STORICO FUORI RIVIERE-VIA XX SETTEMBRE"),
+    ("C1","C1 - PORTELLO"),
+    ("C2","C2 - STAZIONE,SCROVEGNI,C.SO DEL POPOLO,FIERA, CITTADELLA"),
+    ("C3","C3 - BORGOMAGNO, PRIMA ARCELLA, PESCAROTTO"),
+    ("C4","C4 - ZONA DIREZIONALE PADOVAUNO"),
+    ("C5","C5 - MADONNA PELLEGRINA, S.RITA, NAZARETH,SANT`OSVALDO"),
+    ("C6a","C6a - PALESTRO, SACRA FAMIGLIA, SAN GIUSEPPE"),
+    ("C6b","C6b - PORTA TRENTO"),
+    ("D1","D1 - CHIESANUOVA,BRUSEGANA"),
+    ("D2","D2 - PALTANA, VOLTABRUSEGANA, MANDRIA"),
+    ("D3","D3 - BASSANELLO, GUIZZA, VOLTABAROZZO"),
+    ("D4","D4 - PONTE DI BRENTA, SAN LAZZARO"),
+    ("D5a","D5a - SANT'IGNAZIO, MONTA'"),
+    ("D5b","D5b - SACRO CUORE"),
+    ("D6","D6 - TORRE, PONTEVIGODARZERE, SACRO CUORE"),
+    ("D7","D7 - ARCELLA NORD, MORTISE"),
+    ("D8a","D8a - FORCELLINI EST"),
+    ("D8b","D8b - SAN GREGORIO"),
+    ("D8c","D8c - TERRANEGRA"),
+    ("E1","E1 - CAMIN"),
+    ("E2","E2 - ZONA INDUSTRIALE,ZIP"),
+    ("E3","E3 - SALBORO"),
+    ("R1","R1 - RURALE NORD COMPRENDE QUARTIERE PONTEROTTO"),
+    ("R2","R2 - RURALE OVEST"),
+    ("R3","R3 - RURALE SUD"),
+]
+
+def validate_cf(value):
+    res1 = True
+    try:
+        ssn_validation(value)
+    except:
+        res1 = False
+    res2 = True
+    try:
+        vat_number_validation(value)
+    except:
+        res2 = False
+
+    if not (res1 or res2):
+        raise ValidationError("Codice fiscale errato")
 
 class SymmetricEncryption(object):
     """
@@ -64,6 +122,11 @@ class SymmetricEncryption(object):
 
 
 class Block(models.Model):
+
+    class Meta:
+        verbose_name = "Credito"
+        verbose_name_plural = "Crediti"
+
     time_stamp = models.DateTimeField(auto_now_add=False)
     index = models.IntegerField(auto_created=True, blank=True)
     data = models.TextField(blank=True, max_length=255)
@@ -72,11 +135,38 @@ class Block(models.Model):
     chain = models.ForeignKey(to='crediti', on_delete=models.CASCADE)
     nonce = models.CharField(max_length=255, default=0, blank=True)
 
+    @property
+    def isovalore(self):
+        return self.chain.isovalore
+
+    @property
+    def causale(self):
+        return self.data_val("causale")
+
+    @property
+    def cf(self):
+        return self.data_val("cf")
+
+    @property
+    def volumetria(self):
+        return "{} {}".format( self.data_val("volumetria"),self.data_val("tipo") )
+
+    @property
+    def tipo(self):
+        return self.data_val("tipo") or "CE"
+
     def __str__(self):
-        return "Block " + str(self.index) + " on " + self.chain.nome
+        return "{}#{}:{} {} {} {}".format(
+            self.causale,
+            str(self.id),
+            self.hash[-6:],
+            self.cf,
+            self.volumetria,
+            self.tipo
+        )
 
     def __repr__(self):
-        return '{}:{}'.format(self.index, str(self.hash)[:8])
+        return '{}:{}'.format(self.index, str(self.hash)[-6:])
 
     def __hash__(self):
         return sha256(
@@ -87,10 +177,14 @@ class Block(models.Model):
                 self.nonce).encode('utf-8')).hexdigest()
 
     @staticmethod
-    def generate_next(latest_block, data):
+    def generate_next(latest_block, data, seed=False):
+        if seed:
+            index = 0
+        else:
+            index=latest_block.index + 1
         block = Block(
             data=data,
-            index=latest_block.index + 1,
+            index=index,
             time_stamp=datetime.now(tz=pytz.timezone('Europe/Rome')),
             previous_hash=latest_block.hash,
             nonce=SymmetricEncryption.generate_salt(26),
@@ -123,7 +217,7 @@ class Block(models.Model):
         return json.loads(self.data)
     
     def data_val(self,key):
-        return self.data_dict()[key]
+        return self.data_dict().get(key) #attenzione! potrebbe dare falsi risultati in caso di chiave non esistente
     
     def key_in_data(self,key):
         return key in self.data_dict()
@@ -138,10 +232,11 @@ class Block(models.Model):
     
     def can_transact(self):    
         """ check if block is available for transaction verifying if block hash is not referenced by any other block"""
-        return self.is_leaf()
+        print("can_transact", self.is_leaf(), self.data_val("causale"), self.data_val("causale") != 'utilizzo')
+        return self.is_leaf() and self.data_val("causale") != 'utilizzo'
     
     def is_leaf(self):
-        if self.chain.block_set.filter(previous_hash=self.hash):
+        if self.chain.block_set.filter(previous_hash=self.hash): #self.pk != self.chain.seed.pk and 
             return False
         else:
             return True
@@ -162,18 +257,24 @@ class Block(models.Model):
 
 
 class crediti(models.Model):
+
+    class Meta:
+        verbose_name = "Formazione"
+        verbose_name_plural = "Formazioni"
+
     """
     allows for multiple blockchain entities to exist simultaneously
     """
     time_stamp = models.DateTimeField(auto_now_add=True)
     nome = models.CharField(max_length=255)
-    cf = models.CharField(max_length=255)
+    #cf = models.CharField(max_length=255, validators =[validate_cf])
+    titolare = models.ForeignKey(to='anagrafica', on_delete=models.CASCADE)
     coordinateCatastali = models.CharField(max_length=255)
-    isovalore = models.CharField(max_length=10)
+    isovalore = models.CharField(max_length=60,choices=ISOVALORE_CHOICES)
     the_geom = models.MultiPolygonField(srid=3003,null=True,blank=True)
     volumetria = models.DecimalField(max_digits=10, decimal_places=2)
+    tipo = models.CharField(max_length=3,choices=TIPO_CREDITO_CHOICES)
     descrizione = models.CharField(max_length=255)
-
 
     def __str__(self):
         return '{}_{}'.format(self.nome,self.isovalore)
@@ -192,12 +293,17 @@ class crediti(models.Model):
             "isovalore": self.isovalore,
             #"the_geom": self.the_geom.wkt,
             "volumetria": float(self.volumetria),
+            "tipo": self.tipo,
             "descrizione": self.descrizione
         }
         return json.dumps(record, cls=DjangoJSONEncoder)
 
     def __repr__(self):
         return '{}_{}: {}'.format(self.nome,self.isovalore, self.last_block)
+
+    @property
+    def cf(self):
+        return self.titolare.cf
 
     @property
     def last_block(self):
@@ -209,11 +315,21 @@ class crediti(models.Model):
 
     def create_seed(self):
         assert self.pk is not None
-        seed = Block.generate_next(
-            Block(hash=sha256('seed'.encode('utf-8')).hexdigest(),
-                  index=-1),
-            data=self.data,
-        )
+        last_credito = crediti.objects.last()
+        print ("LAST CREDITO", last_credito)
+        if last_credito: #viene preso come seed il blocco seed dell'ultimo credito esistente
+            seed = Block.generate_next(
+                last_credito.block_set.first(),
+                data=self.data,
+                seed=True
+            )
+        else: 
+            seed = Block.generate_next(
+                Block(hash=sha256('seed'.encode('utf-8')).hexdigest(),
+                    index=-1),
+                data=self.data,
+                seed=True
+            )
         seed.chain = self
         seed.save()
 
@@ -265,15 +381,25 @@ class crediti(models.Model):
                 block.chain = self
                 block.save()
                 
-    def disponibilita(self):
+    def crediti_disponibili(self):
         result = []
         for block in self.block_set.order_by('index'):
             if block.is_leaf():
                 if not block.data_query(causale="utilizzo"):
                     result.append(block)
         return result
+    
+    @property
+    def disponibilita_residua(self):
+        res = reduce( (lambda x, y: x + y), [ b.data_val("volumetria") for b in self.crediti_disponibili() ],0)
+        return res
+    
+    @property
+    def utilizzazione(self):
+        res = reduce( (lambda x, y: x + y), [ b.data_val("volumetria") for b in self.crediti_utilizzati() ],0)
+        return res
 
-    def utilizzi(self):
+    def crediti_utilizzati(self):
         return filter(lambda block: block.data_query(causale="utilizzo"), self.block_set.order_by('index'))
     
     def save(self, *args, **kwargs):
@@ -281,42 +407,54 @@ class crediti(models.Model):
         self.create_seed()
 
 class transazioni(models.Model):
+
+    class Meta:
+        verbose_name = "Trasferimento"
+        verbose_name_plural = "Trasferimenti"
+
     time_stamp = models.DateTimeField(auto_now_add=True)
     origine = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='transazioni_origine')
     destinazione = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='transazioni_destinazione',null=True,blank=True)
     residuo = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='transazioni_residuo',null=True,blank=True)
     nome = models.CharField(max_length=255)
-    cf = models.CharField(max_length=255)
+    #cf = models.CharField(max_length=255, validators =[validate_cf])
+    titolare = models.ForeignKey(to='anagrafica', on_delete=models.CASCADE)
     repertorio = models.CharField(max_length=255)
     volumetria = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
 
     @property
-    def data(self):
-        return {
-            
-        }
+    def isovalore(self):
+        return self.origine.chain.isovalore
+
+    @property
+    def cf(self):
+        return self.titolare.cf
+
+    @property
+    def tipo(self):
+        return self.origine.chain.tipo
 
     def save(self, *args, **kwargs):
 
         if not self.origine.can_transact():
-            raise ("Il blocco di origine è gia stato utilizzato")
+            raise RequestAborted("Il blocco di origine è gia stato utilizzato")
 
-        origine_data = json.loads(self.origine.data)
-        disponibilita = float(origine_data["volumetria"])
+        disponibilita = float(self.origine.data_val("volumetria"))
         residuo_block = None
 
         self.volumetria = float(self.volumetria or disponibilita)
 
         if self.volumetria > disponibilita:
-            raise ("la volumetria da transare è superiore a quella disponibile")
+            raise RequestAborted("la volumetria da trasferire è superiore a quella disponibile")
 
         if self.volumetria < disponibilita:
             residuo_data = {
             "causale": "residuo",
-            "time_stamp": origine_data["time_stamp"],
-            "nome": origine_data["nome"],
-            "cf": origine_data["cf"],
-            "volumetria": disponibilita - self.volumetria
+            "time_stamp": self.origine.data_val("time_stamp"),
+            "nome": self.origine.data_val("nome"),
+            "cf": self.origine.data_val("cf"),
+            "volumetria": disponibilita - self.volumetria,
+            "tipo": self.tipo,
             }
             residuo_block = self.origine.chain.add(self.origine,json.dumps(residuo_data))
 
@@ -329,13 +467,14 @@ class transazioni(models.Model):
         print ("timestamp", self.time_stamp)
 
         transazione_block = {
-            "causale": "transazione",
+            "causale": "trasferimento",
             "residuo": residuo_block.hash if residuo_block else False,
             "time_stamp": self.time_stamp,
             "nome": self.nome,
             "cf": self.cf,
             "volumetria": self.volumetria,
-            "repertorio": self.repertorio
+            "tipo": self.tipo,
+            "descrizione": self.repertorio
         }
 
         self.residuo = residuo_block
@@ -344,6 +483,11 @@ class transazioni(models.Model):
 
 
 class utilizzi(models.Model):
+
+    class Meta:
+        verbose_name = "Utilizzo"
+        verbose_name_plural = "Utilizzi"
+
     time_stamp = models.DateTimeField(auto_now_add=True)
     origine = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='utilizzi_origine')
     destinazione = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='utilizzi_destinazione',null=True,blank=True)
@@ -354,10 +498,17 @@ class utilizzi(models.Model):
     volumetria = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
     causale = models.CharField(max_length=255)
 
+    @property
+    def cf(self):
+        return self.origine.cf
+
+    @property
+    def tipo(self):
+        return self.origine.chain.tipo
 
     def save(self, *args, **kwargs):
         if not self.origine.can_transact():
-            raise ("Il blocco di origine è gia stato utilizzato")
+            raise RequestAborted("Il blocco di origine è gia stato utilizzato")
 
         disponibilita = float(self.origine.data_val("volumetria"))
         residuo_block = None
@@ -365,7 +516,7 @@ class utilizzi(models.Model):
         self.volumetria = float(self.volumetria or disponibilita)
 
         if self.volumetria > disponibilita:
-            raise ("la volumetria da transare è superiore a quella disponibile")
+            raise RequestAborted("la volumetria da utilizzare è superiore a quella disponibile")
 
         if self.volumetria < disponibilita:
             residuo_data = {
@@ -373,7 +524,8 @@ class utilizzi(models.Model):
             "time_stamp": self.origine.data_val("time_stamp"),
             "nome": self.origine.data_val("nome"),
             "cf": self.origine.data_val("cf"),
-            "volumetria": disponibilita - self.volumetria
+            "volumetria": disponibilita - self.volumetria,
+            "tipo": self.tipo,
             }
             residuo_block = self.origine.chain.add(self.origine, json.dumps(residuo_data, cls=DjangoJSONEncoder))
 
@@ -391,10 +543,49 @@ class utilizzi(models.Model):
             "coordinateCatastali": self.coordinateCatastali,
             "isovalore": self.isovalore,
             "volumetria": self.volumetria,
+            "tipo": self.tipo,
             "descrizione": self.causale
         }
 
         self.residuo = residuo_block
         self.destinazione = self.origine.chain.add(self.origine, json.dumps(utilizzo_block, cls=DjangoJSONEncoder))
         super(utilizzi,self).save(*args, **kwargs)
+
+
+class isovalore(models.Model):
+    class Meta:
+        managed = False
+        db_table = 'pi_variante_generale.zone_isovalore'
+        verbose_name_plural = "Zona di isovalore"
+        verbose_name = "Zone di isovalore"
+
+    fid = models.IntegerField(primary_key=True, db_column='ogc_fid')
+    the_geom = models.PolygonField(srid=3003, blank=True, db_column='the_geom')
+    codice_zona = models.TextField(null=True,blank=True, db_column='ZONA_ISO')
+    denominazione = models.TextField(null=True,blank=True, db_column='DENOM')
+
+    def save(self, *args, **kwargs):
+        return
+
+    def delete(self, *args, **kwargs):
+        return
+
+
+class anagrafica(models.Model):
+
+    cf = models.CharField(max_length=15, primary_key=True, validators =[validate_cf])
+    consente_trattamento_dati = models.BooleanField()
+    cognome = models.CharField(max_length=255)
+    nome = models.CharField(max_length=255)
+    indirizzo = models.CharField(max_length=255)
+    telefono = models.CharField(max_length=255)
+    email = models.CharField(max_length=255)
+    note = models.CharField(max_length=255)
+
+    def save(self, *args, **kwargs):
+        self.cf = self.cf.upper()
+        super(anagrafica,self).save(*args, **kwargs)
+
+    def __str__(self):
+        return '{}_{}'.format(self.cognome,self.nome)
 
