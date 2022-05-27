@@ -132,7 +132,7 @@ class Block(models.Model):
     data = models.TextField(blank=True, max_length=255)
     hash = models.CharField(max_length=255, blank=True)
     previous_hash = models.CharField(max_length=255)
-    chain = models.ForeignKey(to='crediti', on_delete=models.CASCADE)
+    chain = models.ForeignKey(to='formazione', on_delete=models.CASCADE)
     nonce = models.CharField(max_length=255, default=0, blank=True)
 
     @property
@@ -148,12 +148,16 @@ class Block(models.Model):
         return self.data_val("cf")
 
     @property
-    def volumetria(self):
-        return "{} {}".format( self.data_val("volumetria"),self.data_val("tipo") )
+    def ammontare_credito(self):
+        return "{} {}".format( self.data_val("ammontare_credito"),self.data_val("tipo") )
 
     @property
     def tipo(self):
         return self.data_val("tipo") or "CE"
+
+    @property
+    def disponibile(self):
+        return self.can_transact()
 
     def __str__(self):
         return "{}#{}:{} {} {} {}".format(
@@ -161,7 +165,7 @@ class Block(models.Model):
             str(self.id),
             self.hash[-6:],
             self.cf,
-            self.volumetria,
+            self.ammontare_credito,
             self.tipo
         )
 
@@ -256,7 +260,7 @@ class Block(models.Model):
         return result
 
 
-class crediti(models.Model):
+class formazione(models.Model):
 
     class Meta:
         verbose_name = "Formazione"
@@ -272,12 +276,12 @@ class crediti(models.Model):
     coordinateCatastali = models.CharField(max_length=255)
     isovalore = models.CharField(max_length=60,choices=ISOVALORE_CHOICES)
     the_geom = models.MultiPolygonField(srid=3003,null=True,blank=True)
-    volumetria = models.DecimalField(max_digits=10, decimal_places=2)
+    ammontare_credito = models.DecimalField(max_digits=10, decimal_places=2)
     tipo = models.CharField(max_length=3,choices=TIPO_CREDITO_CHOICES)
     descrizione = models.CharField(max_length=255)
 
     def __str__(self):
-        return '{}_{}'.format(self.nome,self.isovalore)
+        return '{}_{}_{}{}'.format(self.cf,self.isovalore,self.ammontare_credito,self.tipo)
 
     def __len__(self):
         return self.block_set.count()
@@ -292,18 +296,18 @@ class crediti(models.Model):
             "coordinateCatastali": self.coordinateCatastali,
             "isovalore": self.isovalore,
             #"the_geom": self.the_geom.wkt,
-            "volumetria": float(self.volumetria),
+            "ammontare_credito": float(self.ammontare_credito),
             "tipo": self.tipo,
             "descrizione": self.descrizione
         }
-        return json.dumps(record, cls=DjangoJSONEncoder)
+        return json.dumps(record, separators=(',', ':'), cls=DjangoJSONEncoder)
 
     def __repr__(self):
         return '{}_{}: {}'.format(self.nome,self.isovalore, self.last_block)
 
     @property
     def cf(self):
-        return self.titolare.cf
+        return self.titolare.cf or "--------"
 
     @property
     def last_block(self):
@@ -315,7 +319,7 @@ class crediti(models.Model):
 
     def create_seed(self):
         assert self.pk is not None
-        last_credito = crediti.objects.last()
+        last_credito = formazione.objects.last()
         print ("LAST CREDITO", last_credito)
         if last_credito: #viene preso come seed il blocco seed dell'ultimo credito esistente
             seed = Block.generate_next(
@@ -348,6 +352,10 @@ class crediti(models.Model):
         block.save()
         print (block.data)
         return block
+
+    @property
+    def blockchain_valida(self):
+        return self.is_valid_chain()
     
     def is_valid_chain(self, blocks=None):
         blocks = blocks or list(self.block_set.order_by('index'))
@@ -381,32 +389,38 @@ class crediti(models.Model):
                 block.chain = self
                 block.save()
                 
-    def crediti_disponibili(self):
+    def crediti_disponibili(self,cf=None):
         result = []
         for block in self.block_set.order_by('index'):
             if block.is_leaf():
                 if not block.data_query(causale="utilizzo"):
-                    result.append(block)
+                    if not cf or (cf and block.data_val("cf") == cf):
+                        result.append(block)
         return result
     
     @property
     def disponibilita_residua(self):
-        res = reduce( (lambda x, y: x + y), [ b.data_val("volumetria") for b in self.crediti_disponibili() ],0)
+        res = reduce( (lambda x, y: x + y), [ b.data_val("ammontare_credito") for b in self.crediti_disponibili() ],0)
         return res
     
     @property
     def utilizzazione(self):
-        res = reduce( (lambda x, y: x + y), [ b.data_val("volumetria") for b in self.crediti_utilizzati() ],0)
+        res = reduce( (lambda x, y: x + y), [ b.data_val("ammontare_credito") for b in self.crediti_utilizzati() ],0)
         return res
 
-    def crediti_utilizzati(self):
-        return filter(lambda block: block.data_query(causale="utilizzo"), self.block_set.order_by('index'))
+    def crediti_utilizzati(self,cf=None):
+        crediti_set = self.block_set.filter(data__contains='"causale":"utilizzo"')
+        if cf:
+            crediti_set.filter(data__contains='"cf":"%s"' % cf)
+        print ("crediti_set",crediti_set)
+        return crediti_set.order_by('index')
+        #return filter(lambda block: block.data_query(causale="utilizzo"), crediti_set)
     
     def save(self, *args, **kwargs):
-        super(crediti,self).save(*args, **kwargs)
+        super(formazione,self).save(*args, **kwargs)
         self.create_seed()
 
-class transazioni(models.Model):
+class trasferimento(models.Model):
 
     class Meta:
         verbose_name = "Trasferimento"
@@ -420,7 +434,7 @@ class transazioni(models.Model):
     #cf = models.CharField(max_length=255, validators =[validate_cf])
     titolare = models.ForeignKey(to='anagrafica', on_delete=models.CASCADE)
     repertorio = models.CharField(max_length=255)
-    volumetria = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
+    ammontare_credito = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
 
     @property
     def isovalore(self):
@@ -439,29 +453,29 @@ class transazioni(models.Model):
         if not self.origine.can_transact():
             raise RequestAborted("Il blocco di origine è gia stato utilizzato")
 
-        disponibilita = float(self.origine.data_val("volumetria"))
+        disponibilita = float(self.origine.data_val("ammontare_credito"))
         residuo_block = None
 
-        self.volumetria = float(self.volumetria or disponibilita)
+        self.ammontare_credito = float(self.ammontare_credito or disponibilita)
 
-        if self.volumetria > disponibilita:
-            raise RequestAborted("la volumetria da trasferire è superiore a quella disponibile")
+        if self.ammontare_credito > disponibilita:
+            raise RequestAborted("Il credito da trasferire è superiore a quello disponibile")
 
-        if self.volumetria < disponibilita:
+        if self.ammontare_credito < disponibilita:
             residuo_data = {
             "causale": "residuo",
             "time_stamp": self.origine.data_val("time_stamp"),
             "nome": self.origine.data_val("nome"),
             "cf": self.origine.data_val("cf"),
-            "volumetria": disponibilita - self.volumetria,
+            "ammontare_credito": disponibilita - self.ammontare_credito,
             "tipo": self.tipo,
             }
-            residuo_block = self.origine.chain.add(self.origine,json.dumps(residuo_data))
+            residuo_block = self.origine.chain.add(self.origine,json.dumps(residuo_data, separators=(',', ':')))
 
-            print ("trasferimento di:", self.volumetria," con residuo:", disponibilita - self.volumetria )
+            print ("trasferimento di:", self.ammontare_credito," con residuo:", disponibilita - self.ammontare_credito )
         
         else:
-            print ("trasferimento senza residuo: ", self.volumetria)
+            print ("trasferimento senza residuo: ", self.ammontare_credito)
 
         self.time_stamp = self.time_stamp or datetime.now(tz=pytz.timezone('Europe/Rome'))
         print ("timestamp", self.time_stamp)
@@ -472,17 +486,17 @@ class transazioni(models.Model):
             "time_stamp": self.time_stamp,
             "nome": self.nome,
             "cf": self.cf,
-            "volumetria": self.volumetria,
+            "ammontare_credito": self.ammontare_credito,
             "tipo": self.tipo,
             "descrizione": self.repertorio
         }
 
         self.residuo = residuo_block
-        self.destinazione = self.origine.chain.add(self.origine,json.dumps(transazione_block, cls=DjangoJSONEncoder))
-        super(transazioni,self).save(*args, **kwargs)
+        self.destinazione = self.origine.chain.add(self.origine,json.dumps(transazione_block, separators=(',', ':'), cls=DjangoJSONEncoder))
+        super(trasferimento,self).save(*args, **kwargs)
 
 
-class utilizzi(models.Model):
+class utilizzo(models.Model):
 
     class Meta:
         verbose_name = "Utilizzo"
@@ -495,7 +509,7 @@ class utilizzi(models.Model):
     coordinateCatastali = models.CharField(max_length=255)
     isovalore = models.CharField(max_length=10)
     the_geom = models.MultiPolygonField(srid=3003,null=True,blank=True)
-    volumetria = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
+    ammontare_credito = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
     causale = models.CharField(max_length=255)
 
     @property
@@ -510,29 +524,29 @@ class utilizzi(models.Model):
         if not self.origine.can_transact():
             raise RequestAborted("Il blocco di origine è gia stato utilizzato")
 
-        disponibilita = float(self.origine.data_val("volumetria"))
+        disponibilita = float(self.origine.data_val("ammontare_credito"))
         residuo_block = None
 
-        self.volumetria = float(self.volumetria or disponibilita)
+        self.ammontare_credito = float(self.ammontare_credito or disponibilita)
 
-        if self.volumetria > disponibilita:
-            raise RequestAborted("la volumetria da utilizzare è superiore a quella disponibile")
+        if self.ammontare_credito > disponibilita:
+            raise RequestAborted("Il credito da utilizzare è superiore a quello disponibile")
 
-        if self.volumetria < disponibilita:
+        if self.ammontare_credito < disponibilita:
             residuo_data = {
             "causale": "residuo",
             "time_stamp": self.origine.data_val("time_stamp"),
             "nome": self.origine.data_val("nome"),
             "cf": self.origine.data_val("cf"),
-            "volumetria": disponibilita - self.volumetria,
+            "ammontare_credito": disponibilita - self.ammontare_credito,
             "tipo": self.tipo,
             }
-            residuo_block = self.origine.chain.add(self.origine, json.dumps(residuo_data, cls=DjangoJSONEncoder))
+            residuo_block = self.origine.chain.add(self.origine, json.dumps(residuo_data, separators=(',', ':'), cls=DjangoJSONEncoder))
 
-            print ("utilizzo di:", self.volumetria," con residuo:", disponibilita - self.volumetria )
+            print ("utilizzo di:", self.ammontare_credito," con residuo:", disponibilita - self.ammontare_credito )
         
         else:
-            print ("utilizzo senza residuo: ", self.volumetria)
+            print ("utilizzo senza residuo: ", self.ammontare_credito)
 
         self.time_stamp = self.time_stamp or datetime.now(tz=pytz.timezone('Europe/Rome'))
         utilizzo_block = {
@@ -542,27 +556,34 @@ class utilizzi(models.Model):
             "cf": self.origine.data_val("cf"),
             "coordinateCatastali": self.coordinateCatastali,
             "isovalore": self.isovalore,
-            "volumetria": self.volumetria,
+            "ammontare_credito": self.ammontare_credito,
             "tipo": self.tipo,
             "descrizione": self.causale
         }
 
         self.residuo = residuo_block
-        self.destinazione = self.origine.chain.add(self.origine, json.dumps(utilizzo_block, cls=DjangoJSONEncoder))
-        super(utilizzi,self).save(*args, **kwargs)
+        self.destinazione = self.origine.chain.add(self.origine, json.dumps(utilizzo_block, separators=(',', ':'), cls=DjangoJSONEncoder))
+        super(utilizzo,self).save(*args, **kwargs)
 
 
 class isovalore(models.Model):
     class Meta:
         managed = False
-        db_table = 'pi_variante_generale.zone_isovalore'
+        db_table = 'zone_isovalore'
         verbose_name_plural = "Zona di isovalore"
         verbose_name = "Zone di isovalore"
 
     fid = models.IntegerField(primary_key=True, db_column='ogc_fid')
-    the_geom = models.PolygonField(srid=3003, blank=True, db_column='the_geom')
-    codice_zona = models.TextField(null=True,blank=True, db_column='ZONA_ISO')
-    denominazione = models.TextField(null=True,blank=True, db_column='DENOM')
+    the_geom = models.MultiPolygonField(srid=3003,db_column='the_geom')
+    codice_zona = models.CharField(max_length=10, db_column='ZONA_ISO')
+    denominazione = models.CharField(max_length=70, db_column='DENOM')
+    areeurb_valoreconvenzionale = models.IntegerField(db_column='Q_AB_NUOVO')
+    areeurb_valorearea = models.IntegerField(db_column='U_INAREAVr')
+    areenonurb_valorearea = models.IntegerField(db_column='DU_INAREAVr')
+
+
+    def __str__(self):
+        return "{} {}".format(self.codice_zona,self.denominazione)
 
     def save(self, *args, **kwargs):
         return
@@ -573,19 +594,37 @@ class isovalore(models.Model):
 
 class anagrafica(models.Model):
 
-    cf = models.CharField(max_length=15, primary_key=True, validators =[validate_cf])
+    class Meta:
+        verbose_name = "Anagrafica"
+        verbose_name_plural = "Anagrafica"
+
+    cf = models.CharField(max_length=16, primary_key=True, validators =[validate_cf])
     consente_trattamento_dati = models.BooleanField()
-    cognome = models.CharField(max_length=255)
-    nome = models.CharField(max_length=255)
+    cognome = models.CharField(verbose_name="cognome/denominazione",max_length=255)
+    nome = models.CharField(verbose_name="nome/suffisso",max_length=255)
     indirizzo = models.CharField(max_length=255)
     telefono = models.CharField(max_length=255)
     email = models.CharField(max_length=255)
-    note = models.CharField(max_length=255)
+    note = models.CharField(max_length=255,null=True,blank=True)
+
+    def crediti_disponibili(self):
+        tutte_formazioni = formazione.objects.all()
+        blks = []
+        for credito in tutte_formazioni:
+            blks += [b for b in credito.crediti_disponibili(self.cf)]
+        return blks
+    
+    @property
+    def disponibilita(self):
+        res = reduce( (lambda x, y: x + y), [ b.data_val("ammontare_credito") for b in self.crediti_disponibili() ],0)
+        return res
 
     def save(self, *args, **kwargs):
         self.cf = self.cf.upper()
+        self.cognome = self.cognome.upper()
+        self.nome = self.nome.capitalize()
         super(anagrafica,self).save(*args, **kwargs)
 
     def __str__(self):
-        return '{}_{}'.format(self.cognome,self.nome)
+        return self.cf
 
