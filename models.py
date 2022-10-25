@@ -15,6 +15,8 @@ from cryptography.fernet import Fernet, base64, InvalidSignature, InvalidToken
 import hashlib
 from functools import reduce
 
+from certificati.coordinateCatastali import GeomFromCoordinateCatastali
+
 __author__ = "Enrico Ferreguti"
 __email__ = "enricofer@gmail.com"
 __copyright__ = "Copyright 2022, Enrico Ferreguti"
@@ -220,6 +222,21 @@ class Block(models.Model):
     def data_dict(self):
         return json.loads(self.data)
     
+    @property
+    def as_dict(self):
+        record = self.data_dict()
+        record["hash"] = self.hash
+        record["prev_hash"] = self.previous_hash
+        record["id"] = self.pk
+        record["isovalore"] = self.chain.isovalore
+        record["isovalore_descrizione"] = isovalore.objects.get(codice_zona=self.chain.isovalore).denominazione if self.chain.isovalore else ""
+        previous_block = Block.objects.filter(hash=self.previous_hash).first()
+        record["prev_id"] = previous_block.pk if previous_block else -1
+        record["nonce"] = self.nonce
+        record["disponibile"] = self.can_transact()
+        record["successori"] = [b.as_dict for b in Block.objects.filter(previous_hash=self.hash)]
+        return record
+    
     def data_val(self,key):
         return self.data_dict().get(key) #attenzione! potrebbe dare falsi risultati in caso di chiave non esistente
     
@@ -275,6 +292,7 @@ class formazione(models.Model):
     titolare = models.ForeignKey(to='anagrafica', on_delete=models.CASCADE)
     coordinateCatastali = models.CharField(max_length=255)
     isovalore = models.CharField(max_length=60,choices=ISOVALORE_CHOICES)
+    #isovalore = models.ForeignKey(to='isovalore',null=True,blank=True, on_delete=models.CASCADE)
     the_geom = models.MultiPolygonField(srid=3003,null=True,blank=True)
     ammontare_credito = models.DecimalField(max_digits=10, decimal_places=2)
     tipo = models.CharField(max_length=3,choices=TIPO_CREDITO_CHOICES)
@@ -285,10 +303,16 @@ class formazione(models.Model):
 
     def __len__(self):
         return self.block_set.count()
-
+    
     @property
-    def data(self):
-        record = {
+    def __isovalore(self):
+        try:
+            return self.zona_isovalore.codice_zona
+        except:
+            return self.seed.data_val("isovalore")
+
+    def get_data_record(self):
+        return {
             "causale": "formazione",
             "time_stamp": self.time_stamp or datetime.now(tz=pytz.timezone('Europe/Rome')),
             "nome": self.nome,
@@ -300,7 +324,10 @@ class formazione(models.Model):
             "tipo": self.tipo,
             "descrizione": self.descrizione
         }
-        return json.dumps(record, separators=(',', ':'), cls=DjangoJSONEncoder)
+
+    @property
+    def data(self):
+        return json.dumps(self.get_data_record(), separators=(',', ':'), cls=DjangoJSONEncoder)
 
     def __repr__(self):
         return '{}_{}: {}'.format(self.nome,self.isovalore, self.last_block)
@@ -417,6 +444,12 @@ class formazione(models.Model):
         #return filter(lambda block: block.data_query(causale="utilizzo"), crediti_set)
     
     def save(self, *args, **kwargs):
+        #actual_cc = self._meta.get_field('coordinateCatastali').value_from_object(self)
+        #actual_geom = self._meta.get_field('the_geom').value_from_object(self)
+        self.the_geom,self.coordinateCatastali = GeomFromCoordinateCatastali(self.coordinateCatastali, formato='GEOS', check=True)
+        print (self.the_geom.point_on_surface.wkt)
+        zona_isovalore = isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
+        self.isovalore = zona_isovalore.codice_zona
         super(formazione,self).save(*args, **kwargs)
         self.create_seed()
 
@@ -507,7 +540,7 @@ class utilizzo(models.Model):
     destinazione = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='utilizzi_destinazione',null=True,blank=True)
     residuo = models.ForeignKey(to='Block', on_delete=models.CASCADE, related_name='utilizzi_residuo',null=True,blank=True)
     coordinateCatastali = models.CharField(max_length=255)
-    isovalore = models.CharField(max_length=10)
+    isovalore_destinazione = models.CharField(max_length=10)
     the_geom = models.MultiPolygonField(srid=3003,null=True,blank=True)
     ammontare_credito = models.DecimalField(max_digits=10, decimal_places=2,null=True,blank=True)
     causale = models.CharField(max_length=255)
@@ -520,9 +553,28 @@ class utilizzo(models.Model):
     def tipo(self):
         return self.origine.chain.tipo
 
+    @property
+    def isovalore_origine(self):
+        return self.origine.chain.isovalore
+
+    @property
+    def coefficiente_trasformazione(self):
+        zona_isovalore_origine = isovalore.objects.get(codice_zona=self.isovalore_origine)
+        zona_isovalore_destinazione = isovalore.objects.get(codice_zona=self.isovalore_destinazione)
+        return zona_isovalore_origine.areeurb_valoreconvenzionale/zona_isovalore_destinazione.areeurb_valoreconvenzionale
+
+
+    @property
+    def ammontare_credito_trasformato(self):
+        return round(float(self.ammontare_credito)*self.coefficiente_trasformazione,1)
+
     def save(self, *args, **kwargs):
         if not self.origine.can_transact():
             raise RequestAborted("Il blocco di origine è gia stato utilizzato")
+
+        self.the_geom,self.coordinateCatastali = GeomFromCoordinateCatastali(self.coordinateCatastali, formato='GEOS', check=True)
+        zona_isovalore = isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
+        self.isovalore_destinazione = zona_isovalore.codice_zona
 
         disponibilita = float(self.origine.data_val("ammontare_credito"))
         residuo_block = None
@@ -555,7 +607,8 @@ class utilizzo(models.Model):
             "nome": self.origine.data_val("nome"),
             "cf": self.origine.data_val("cf"),
             "coordinateCatastali": self.coordinateCatastali,
-            "isovalore": self.isovalore,
+            "isovalore_origine": self.isovalore_origine,
+            "isovalore_destinazione": self.isovalore_destinazione,
             "ammontare_credito": self.ammontare_credito,
             "tipo": self.tipo,
             "descrizione": self.causale
@@ -563,6 +616,7 @@ class utilizzo(models.Model):
 
         self.residuo = residuo_block
         self.destinazione = self.origine.chain.add(self.origine, json.dumps(utilizzo_block, separators=(',', ':'), cls=DjangoJSONEncoder))
+        
         super(utilizzo,self).save(*args, **kwargs)
 
 
@@ -581,9 +635,12 @@ class isovalore(models.Model):
     areeurb_valorearea = models.IntegerField(db_column='U_INAREAVr')
     areenonurb_valorearea = models.IntegerField(db_column='DU_INAREAVr')
 
+    def trasformazione(self,zona_dest):
+        isovalore_dest = isovalore.objects.get(codice_zona=zona_dest)
+        return round(self.areeurb_valoreconvenzionale/isovalore_dest.areeurb_valoreconvenzionale, 4)
 
     def __str__(self):
-        return "{} {}".format(self.codice_zona,self.denominazione)
+        return "{} {} / {} {}".format(self.pk, self.fid, self.codice_zona,self.denominazione)
 
     def save(self, *args, **kwargs):
         return
