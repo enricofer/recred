@@ -142,8 +142,31 @@ class Block(models.Model):
         return self.chain.isovalore
 
     @property
+    def coordinateCatastali(self):
+        return self.chain.coordinateCatastali
+
+    @property
+    def foglioMappale(self):
+        FMs = self.coordinateCatastali.split(' ',)
+        out = ''
+        for FM in FMs:
+            decodeFM = FM.split('/')
+            if decodeFM[0] != FM:
+                if len(decodeFM[1].split('-')) == 1:
+                    mappaleDesc = 'Mappale'
+                else:
+                    mappaleDesc = 'Mappali'
+                out += ' Foglio '+ decodeFM[0]
+                out += ' %s %s'% (mappaleDesc,decodeFM[1])
+        return out
+
+    @property
     def causale(self):
         return self.data_val("causale")
+
+    @property
+    def timestr(self):
+        return self.time_stamp.strftime("%Y-%m-%d %H:%M")
 
     @property
     def cf(self):
@@ -230,6 +253,8 @@ class Block(models.Model):
         record["id"] = self.pk
         record["isovalore"] = self.chain.isovalore
         record["isovalore_descrizione"] = isovalore.objects.get(codice_zona=self.chain.isovalore).denominazione if self.chain.isovalore else ""
+        record["coordinateCatastali"] = self.coordinateCatastali
+        record["foglioMappale"] = self.foglioMappale
         previous_block = Block.objects.filter(hash=self.previous_hash).first()
         record["prev_id"] = previous_block.pk if previous_block else -1
         record["nonce"] = self.nonce

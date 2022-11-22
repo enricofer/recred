@@ -150,8 +150,30 @@ class blockAdmin (DjangoObjectActions, admin.OSMGeoAdmin):
     def esporta_il_recred(self, request, obj):
         engine = Renderer()
         blockset = []
-        for block in Block.objects.all().order_by("pk"):
-            blockset.append(block.as_dict)
+        blocchipk_con_disponibilita = []
+        for block in Block.objects.all():
+            if block.chain.disponibilita_residua > 0:
+                blocchipk_con_disponibilita.append(block.pk)
+        for block in Block.objects.filter(pk__in=blocchipk_con_disponibilita).order_by("-pk"):
+            blockprops = block.as_dict
+            blockprops["time"] = block.timestr
+            blockprops["coordinateCatastali"] = block.coordinateCatastali
+            blockprops["isovalore"] = block.isovalore
+            blockset.append(blockprops)
+            titolare_obj = anagrafica.objects.get(cf=blockprops["cf"])
+            if titolare_obj.consente_trattamento_dati:
+
+                blockprops["cf"] =  "%s (%s %s %s %s tel:%s)" % (
+                    titolare_obj.cf,
+                    titolare_obj.cognome,
+                    titolare_obj.nome,
+                    titolare_obj.indirizzo,
+                    titolare_obj.email,
+                    titolare_obj.telefono,
+                )
+            else:
+                blockprops["cf"] = titolare_obj.cf
+
         modello_path = os.path.join(os.path.dirname(__file__),'templates','registro_recred.odt') #modello.modello_odt.path
         result = engine.render(modello_path, blocks=blockset) #parametri=modello.parametri
         return upload_odt(result,filename="recred.odt")
