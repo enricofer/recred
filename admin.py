@@ -5,7 +5,7 @@ from django.urls import reverse
 
 from django_object_actions import DjangoObjectActions
 
-from .models import Block, formazione, trasferimento, utilizzo, anagrafica, isovalore
+from .models import Block, formazione, trasferimento, utilizzo, anagrafica, zona_isovalore as isovalore
 
 from secretary import Renderer
 
@@ -71,6 +71,12 @@ class formazioneAdmin (DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
     list_display = ('pk', 'time_stamp', 'cf','isovalore', 'ammontare_credito', "disponibilita_residua", "utilizzazione",'tipo','blockchain_valida')
     autocomplete_fields = ['titolare']
 
+    class Media:
+        js = ()
+        css = {
+             'all': ('recred/css/remove_addlink.css',) 
+        }
+
     def crediti_utilizzati(self, request, obj):
         if obj:
             pks = [b.pk for b in obj.crediti_utilizzati()]
@@ -125,6 +131,12 @@ class blockAdmin (DjangoObjectActions, admin.OSMGeoAdmin):
     fields = ['index','data','chain','hash', 'previous_hash', 'nonce']
     list_display = ('pk', 'time_stamp', 'causale', 'cf', 'isovalore', 'ammontare_credito', 'disponibile', 'hash')
     search_fields = ['hash', 'data']
+
+    class Media:
+        js = ()
+        css = {
+             'all': ('recred/css/remove_addlink.css',) 
+        }
 
     def emetti_il_certificato(self, request, obj):
         if obj.data_val("causale") == "utilizzo":
@@ -233,6 +245,12 @@ class trasferimentoAdmin(DjangoObjectActions, admin.OSMGeoAdmin):
     list_display = ('pk', 'time_stamp', 'cf', 'isovalore', 'ammontare_credito')
     autocomplete_fields = ['titolare']
 
+    class Media:
+        js = ()
+        css = {
+             'all': ('recred/css/remove_addlink.css',) 
+        }
+
     def certificato_di_trasferimento(self, request, obj):
         engine = Renderer()
         oggetto = "Certificato di trasferimento di Credito Edilizio"
@@ -292,6 +310,12 @@ class utilizzoAdmin(DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
     fields = ['origine','causale','ammontare_credito','isovalore_origine', 'isovalore_destinazione','coordinateCatastali','the_geom']
     list_display = ('pk', 'time_stamp', 'cf', 'isovalore_origine', 'ammontare_credito', 'isovalore_destinazione', 'ammontare_credito_trasformato')
 
+    class Media:
+        js = ()
+        css = {
+             'all': ('recred/css/remove_addlink.css',) 
+        }
+
     def certificato_di_utilizzo(self, request, obj):
         engine = Renderer()
         oggetto = "Certificato di utilizzo di Credito Edilizio"
@@ -335,8 +359,13 @@ class utilizzoAdmin(DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
 @admin.register(anagrafica)
 class anagraficaAdmin(DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
 
-    change_actions = ("certificato_di_proprieta","crediti_a_disposizione_del_titolare", "crediti_utilizzati_dal_titolare", "crediti_formati_dal_titolare") # 
-
+    change_actions = (
+        "formazione_credito",
+        "certificato_di_proprieta",
+        "crediti_a_disposizione_del_titolare",
+        "crediti_utilizzati_dal_titolare",
+        "crediti_formati_dal_titolare"
+    )
     fields = ['cf','consente_trattamento_dati','cognome','nome','indirizzo','telefono','email','note']
     list_display = ('cf', 'cognome', 'nome', 'disponibilita','consente_trattamento_dati',)
     search_fields = ('cf', 'cognome','note')
@@ -371,6 +400,18 @@ class anagraficaAdmin(DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
         result = engine.render(modello_path, crediti=crediti, oggetto=oggetto, parametri=parametri, titolare=titolare) #parametri=modello.parametri
         return upload_odt(result,filename="certificato_proprieta_%s.odt" % obj.cf)
 
+    def formazione_credito(self, request, obj):
+        if obj:
+            url = "/admin/recred/formazione/add/?titolare=" + obj.cf
+            return HttpResponseRedirect(url) 
+
+
 @admin.register(isovalore)
 class isovaloreAdmin(DjangoObjectActions, baseGeom, admin.OSMGeoAdmin):
-    fields = ['fid', 'codice_zona','denominazione','areeurb_valoreconvenzionale','areeurb_valorearea','areenonurb_valorearea','the_geom']
+    fields = ['codice_zona','denominazione','areeurb_valoreconvenzionale','areeurb_valorearea','areenonurb_valorearea','the_geom']
+
+    class Media:
+        js = ()
+        css = {
+             'all': ('recred/css/remove_addlink.css',) 
+        }

@@ -1,4 +1,5 @@
 from django.contrib.gis.db import models
+from django.contrib.gis.geos import GEOSGeometry
 from django.conf import settings
 from django.contrib.auth.hashers import get_random_string
 from django.core.serializers.json import DjangoJSONEncoder
@@ -7,6 +8,7 @@ from django.core.exceptions import ValidationError,RequestAborted
 from localflavor.it.util import ssn_validation,vat_number_validation
 
 import os
+import requests
 import json
 import pytz
 from hashlib import sha256
@@ -14,8 +16,6 @@ from datetime import datetime
 from cryptography.fernet import Fernet, base64, InvalidSignature, InvalidToken
 import hashlib
 from functools import reduce
-
-from certificati.coordinateCatastali import GeomFromCoordinateCatastali
 
 __author__ = "Enrico Ferreguti"
 __email__ = "enricofer@gmail.com"
@@ -64,6 +64,18 @@ ISOVALORE_CHOICES = [
     ("R2","R2 - RURALE OVEST"),
     ("R3","R3 - RURALE SUD"),
 ]
+
+def GeomFromCoordinateCatastali(coordinateCatastali, formato='GEOS', check=True):
+    url = settings.RAPPER_URL+"certificati/cat_bp/"
+    params = {
+        "format": "wkt",
+        "coordinateCatastali": coordinateCatastali
+    }
+    print (url)
+    res = requests.get(url, params=params)
+    if res.status_code == 200:
+        return GEOSGeometry(res.json()["geom"]), res.json()["feedback"]
+    print (res.url)
 
 def validate_cf(value):
     res1 = True
@@ -252,7 +264,7 @@ class Block(models.Model):
         record["prev_hash"] = self.previous_hash
         record["id"] = self.pk
         record["isovalore"] = self.chain.isovalore
-        record["isovalore_descrizione"] = isovalore.objects.get(codice_zona=self.chain.isovalore).denominazione if self.chain.isovalore else ""
+        record["isovalore_descrizione"] = zona_isovalore.objects.get(codice_zona=self.chain.isovalore).denominazione if self.chain.isovalore else ""
         record["coordinateCatastali"] = self.coordinateCatastali
         record["foglioMappale"] = self.foglioMappale
         previous_block = Block.objects.filter(hash=self.previous_hash).first()
@@ -473,8 +485,8 @@ class formazione(models.Model):
         #actual_geom = self._meta.get_field('the_geom').value_from_object(self)
         self.the_geom,self.coordinateCatastali = GeomFromCoordinateCatastali(self.coordinateCatastali, formato='GEOS', check=True)
         print (self.the_geom.point_on_surface.wkt)
-        zona_isovalore = isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
-        self.isovalore = zona_isovalore.codice_zona
+        isovalore = zona_isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
+        self.isovalore = isovalore.codice_zona
         super(formazione,self).save(*args, **kwargs)
         self.create_seed()
 
@@ -584,8 +596,8 @@ class utilizzo(models.Model):
 
     @property
     def coefficiente_trasformazione(self):
-        zona_isovalore_origine = isovalore.objects.get(codice_zona=self.isovalore_origine)
-        zona_isovalore_destinazione = isovalore.objects.get(codice_zona=self.isovalore_destinazione)
+        zona_isovalore_origine = zona_isovalore.objects.get(codice_zona=self.isovalore_origine)
+        zona_isovalore_destinazione = zona_isovalore.objects.get(codice_zona=self.isovalore_destinazione)
         return zona_isovalore_origine.areeurb_valoreconvenzionale/zona_isovalore_destinazione.areeurb_valoreconvenzionale
 
 
@@ -598,8 +610,8 @@ class utilizzo(models.Model):
             raise RequestAborted("Il blocco di origine è gia stato utilizzato")
 
         self.the_geom,self.coordinateCatastali = GeomFromCoordinateCatastali(self.coordinateCatastali, formato='GEOS', check=True)
-        zona_isovalore = isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
-        self.isovalore_destinazione = zona_isovalore.codice_zona
+        zona_isovalore_destinazione = zona_isovalore.objects.filter(the_geom__intersects=self.the_geom.point_on_surface).first()
+        self.isovalore_destinazione = zona_isovalore_destinazione.codice_zona
 
         disponibilita = float(self.origine.data_val("ammontare_credito"))
         residuo_block = None
@@ -645,27 +657,25 @@ class utilizzo(models.Model):
         super(utilizzo,self).save(*args, **kwargs)
 
 
-class isovalore(models.Model):
-    class Meta:
-        managed = False
-        db_table = 'zone_isovalore'
-        verbose_name_plural = "Zona di isovalore"
-        verbose_name = "Zone di isovalore"
+class zona_isovalore(models.Model):
 
-    fid = models.IntegerField(primary_key=True, db_column='ogc_fid')
-    the_geom = models.MultiPolygonField(srid=3003,db_column='the_geom')
-    codice_zona = models.CharField(max_length=10, db_column='ZONA_ISO')
-    denominazione = models.CharField(max_length=70, db_column='DENOM')
-    areeurb_valoreconvenzionale = models.IntegerField(db_column='Q_AB_NUOVO')
-    areeurb_valorearea = models.IntegerField(db_column='U_INAREAVr')
-    areenonurb_valorearea = models.IntegerField(db_column='DU_INAREAVr')
+    class Meta:
+        verbose_name = "Zone isovalore"
+        verbose_name_plural = "Zona isovalore"
+
+    the_geom = models.MultiPolygonField(srid=3003,)#db_column='the_geom'
+    codice_zona = models.CharField(max_length=10, )#db_column='ZONA_ISO'
+    denominazione = models.CharField(max_length=110, )#db_column='DENOM'
+    areeurb_valoreconvenzionale = models.IntegerField()#db_column='Q_AB_NUOVO'
+    areeurb_valorearea = models.IntegerField()#db_column='U_INAREAVr'
+    areenonurb_valorearea = models.IntegerField()#db_column='DU_INAREAVr'
 
     def trasformazione(self,zona_dest):
-        isovalore_dest = isovalore.objects.get(codice_zona=zona_dest)
+        isovalore_dest = zona_isovalore.objects.get(codice_zona=zona_dest)
         return round(self.areeurb_valoreconvenzionale/isovalore_dest.areeurb_valoreconvenzionale, 4)
 
     def __str__(self):
-        return "{} {} / {} {}".format(self.pk, self.fid, self.codice_zona,self.denominazione)
+        return "{} / {} {}".format(self.pk, self.codice_zona,self.denominazione)
 
     def save(self, *args, **kwargs):
         return
